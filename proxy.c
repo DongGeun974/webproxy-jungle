@@ -25,24 +25,28 @@ void build_http_header(char *http_header,char *hostname,char *path,int port,rio_
 int connect_endServer(char *hostname,int port,char *http_header);
 
 /*cache function*/
-void cache_init();
-int cache_find(char *url);
-int cache_eviction();
-void cache_LRU(int index);
-void cache_uri(char *uri,char *buf);
-void readerPre(int i);
-void readerAfter(int i);
+void cache_init();                      // initialize cache
+int cache_find(char *url);              // find url in cache
+int cache_eviction();                   // find victim
+void cache_LRU(int index);              // using in cache_uri, when uri and buf is stored
+                                        // all LRU of cache --
+void cache_uri(char *uri,char *buf);    // uri and buf is stored in cache
+void readerPre(int i);                  // P(S) : wait
+void readerAfter(int i);                // V(S) : signal
 
 typedef struct {
     char cache_obj[MAX_OBJECT_SIZE];
     char cache_url[MAXLINE];
     int LRU;        // 캐시가 저장된 순서 판단하는 멤버: 10개 넘었을 때, 축출하는 근거로 활용
+                    // least recently used algorithm : 가장 오랫동안 참조되지 않은 페이지 교체
     int isEmpty;    // 캐시가 비어있는지 여부
+                    // 1 is empty, 0 is not empty
 
-    
-    int readCnt;      // 현재 cache를 읽고 있는 reader의 수 
-    sem_t wmutex;     // 한번에 한 스레드만 writing할 수 있도록 보호조치(semaphore)
-    sem_t rdcntmutex; // readCnt(현재 reader 수)를 조작할 때 한번에 한 스레드만 조작할 수 있도록 보호조치(semaphore)
+    int readCnt;        // 현재 cache를 읽고 있는 reader의 수 
+    sem_t wmutex;       // 한번에 한 스레드만 writing할 수 있도록 보호조치(semaphore)
+                        // S = 1
+    sem_t rdcntmutex;   // readCnt(현재 reader 수)를 조작할 때 한번에 한 스레드만 조작할 수 있도록 보호조치(semaphore)
+                        // S = 1
 
 } cache_block;
 
@@ -52,6 +56,8 @@ typedef struct {
     int cache_num;
 } Cache;
 
+
+// 전역 변수 cache
 Cache cache;
 
 
@@ -71,7 +77,9 @@ int main(int argc,char **argv)
         exit(1);
     }
 
-    // 무슨 코드..? --> 자식 프로세스 생성 안하니까 필요 없는거 아닌가..??
+    // SIGPIPE ignore
+    // proxy can access broken pipe(already disconnected fd)
+    // but proxy have to run always
     Signal(SIGPIPE,SIG_IGN);
 
     // Open a listening socket
@@ -119,11 +127,12 @@ void doit(int connfd)
     Rio_readinitb(&rio, connfd);
     Rio_readlineb(&rio, buf, MAXLINE);
     sscanf(buf, "%s %s %s", method, uri, version); /* read the client request line */
-
+    
+    // 일반적인 URI format: http://host:port/path?query_string
     char url_store[100];
     strcpy(url_store,uri);  /* store the original url */
-    // 왜 uri_store가 아니고 url_store인가..
 
+    // this proxy only can handle GET method
     if(strcasecmp(method,"GET")){
         printf("Proxy does not implement the method");
         return;
@@ -281,12 +290,20 @@ void cache_init(){
     for(i=0;i<CACHE_OBJS_COUNT;i++){
         cache.cacheobjs[i].LRU = 0;
         cache.cacheobjs[i].isEmpty = 1;
+        // sem_init(sem_t *sem, int pshared, unisigned int value)
+        // sem : 초기화할 세마포
+        // pshared : thread(0이면, 쓰레드 간 공유 또는 프로세스 간 공유)
+        // value : 세마포 초기값
         Sem_init(&cache.cacheobjs[i].wmutex, 0, 1);
         Sem_init(&cache.cacheobjs[i].rdcntmutex, 0, 1);
         cache.cacheobjs[i].readCnt = 0;
     }
 }
 
+/*
+    reader-writer problem
+    source : https://m.blog.naver.com/hirit808/221786966867
+*/
 
 // reading 과정(교과서 971p. 12.26그림)
 // readcnt를 rdcntmutex semaphore로 보호하고
@@ -300,22 +317,32 @@ void cache_init(){
 void readerPre(int i){
     // readCnt 제어
     P(&cache.cacheobjs[i].rdcntmutex); //캐시 obj의 i번째 캐시  
+
     // reader의 수 하나 증가
     cache.cacheobjs[i].readCnt++; // 971쪽 readcnt++ 의미
+
     // 첫 reader가 등장하면(readCnt: 0 -> 1) writing lock을 걸어준다: P(&w)
+    // reader가 들어왔을 때 혼자이면 자신의 바로 앞에 writer가 실행 중일 수도 있음
+    // writer 실행 여부 파악
     if(cache.cacheobjs[i].readCnt==1) 
+        // 저자가 없으면 넘어가고, 있으면 저자가 없을 때 까지 기다린다.
         P(&cache.cacheobjs[i].wmutex); // i번째 캐시의 write lock 
+
     V(&cache.cacheobjs[i].rdcntmutex);
 }
 
 void readerAfter(int i){
     // readCnt 제어
     P(&cache.cacheobjs[i].rdcntmutex);
+
     // reader의 수 하나 감소
     cache.cacheobjs[i].readCnt--; //971쪽 readcnt-- 의미
+
     // 마지막 reader가 떠나면 (readCnt: 1 -> 0) writing lock을 풀어준다: V(&w)
     if(cache.cacheobjs[i].readCnt==0)
+
         V(&cache.cacheobjs[i].wmutex);
+
     V(&cache.cacheobjs[i].rdcntmutex);
 }
 
