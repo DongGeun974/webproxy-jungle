@@ -4,6 +4,10 @@
 # rule). You instructor will type "make" on your specific Makefile to
 # build your proxy from sources.
 
+#You link to the pthread libray using -lpthread so that the linker can actually find those symbols 
+#in the pthread library during the linking stage.
+
+
 CC = gcc
 CFLAGS = -g -Wall
 LDFLAGS = -lpthread
@@ -26,4 +30,3 @@ handin:
 
 clean:
 	rm -f *~ *.o proxy core *.tar *.zip *.gzip *.bzip *.gz
-
